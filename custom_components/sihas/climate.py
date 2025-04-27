@@ -104,7 +104,7 @@ class Bcm300(SihasEntity, ClimateEntity):
         self.opmode: Optional[BcmOpMode] = None
 
     def set_hvac_mode(self, hvac_mode: str) -> None:
-        """난방(FAN_ONLY), 난방(HEAT), 자동(AUTO), 끄기(OFF) 처리."""
+        """난방, 온돌, 자동, 끄기 등 모드 설정."""
         if hvac_mode == HVACMode.FAN_ONLY:
             self.command(BCM_REG_OUTMODE, 1)
             self.command(BCM_REG_ONOFF, 1)
@@ -120,14 +120,14 @@ class Bcm300(SihasEntity, ClimateEntity):
             self.command(BCM_REG_ONOFF, 0)
 
     def set_temperature(self, **kwargs: Any) -> None:
-        """현재 운전모드(Room/Ondol)에 따라 실내난방 또는 온돌난방 온도 설정."""
+        """현재 모드(Room/Ondol)에 맞춰 온도 설정."""
         tmp = float(kwargs.get(ATTR_TEMPERATURE))
         assert self.opmode is not None, "운전모드 정보 없음"
         reg = BCM_REG_ROOMSETPT if self.opmode.heatMode == BcmHeatMode.Room else BCM_REG_ONDOLSETPT
         self.command(reg, math.floor(tmp))
 
     def update(self) -> None:
-        """최신 레지스터를 읽어 상태 갱신."""
+        """레지스터를 폴링하여 상태 갱신."""
         if regs := self.poll():
             self.opmode = BcmOpMode(regs[BCM_REG_OPERMODE])
             self._attr_hvac_mode = self._resolve_hvac_mode(regs)
@@ -161,15 +161,14 @@ class Bcm300(SihasEntity, ClimateEntity):
 
     def set_hot_water_mode(self, mode: int) -> None:
         """
-        온수 온도 모드 설정 서비스.
-        mode: 0=저온, 1=중온, 2=고온
+        온수 모드 설정: 0=저온,1=중온,2=고온
         """
         assert 0 <= mode <= 2, "mode must be 0, 1 or 2"
         self.command(BCM_REG_ONSUSETPT, mode)
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
-        """엔티티가 추가될 때 ‘set_hot_water_mode’ 서비스를 등록."""
+        """`set_hot_water_mode` 서비스 등록."""
         await super().async_added_to_hass()
         self.hass.services.async_register(
             DOMAIN,
@@ -183,7 +182,7 @@ class Bcm300(SihasEntity, ClimateEntity):
 
     @callback
     def _handle_set_hot_water_mode(self, call: Any) -> None:
-        """서비스 호출 처리: 대상 entity_id에 set_hot_water_mode 실행."""
+        """서비스 호출 처리."""
         target_ids = call.data["entity_id"]
         mode = call.data["mode"]
         if isinstance(target_ids, str):
