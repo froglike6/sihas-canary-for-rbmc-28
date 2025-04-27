@@ -535,6 +535,25 @@ class Bcm300(SihasEntity, ClimateEntity):
             BcmHeatMode.Ondol if (reg & (1 << 2)) != 0 else BcmHeatMode.Room,
         )
 
+    async def async_added_to_hass(self) -> None:
+        """Register custom services when entity is added to HA."""
+        await super().async_added_to_hass()
+    
+        async def handle_set_hot_water_mode(call):
+            mode = call.data.get("mode")
+            if mode is None:
+                _LOGGER.error("mode parameter is required for set_hot_water_mode")
+                return
+            self.set_hot_water_mode(mode)
+    
+        self.hass.services.async_register(
+            domain="sihas",  # 통합 도메인명 (manifest.json의 domain)
+            service="set_hot_water_mode",  # 호출할 서비스명
+            service_func=handle_set_hot_water_mode,
+            schema=vol.Schema({vol.Required("mode"): vol.All(vol.Coerce(int), vol.In([0, 1, 2]))}),
+        )
+
+
 
 # Register index
 class TcmRegister(IntEnum):
