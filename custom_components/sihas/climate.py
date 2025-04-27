@@ -535,23 +535,51 @@ class Bcm300(SihasEntity, ClimateEntity):
             BcmHeatMode.Ondol if (reg & (1 << 2)) != 0 else BcmHeatMode.Room,
         )
 
-    async def async_added_to_hass(self) -> None:
-        """Register custom services when entity is added to HA."""
-        await super().async_added_to_hass()
-    
-        async def handle_set_hot_water_mode(call):
-            mode = call.data.get("mode")
-            if mode is None:
-                _LOGGER.error("mode parameter is required for set_hot_water_mode")
-                return
-            self.set_hot_water_mode(mode)
-    
-        self.hass.services.async_register(
-            domain="sihas",  # 통합 도메인명 (manifest.json의 domain)
-            service="set_hot_water_mode",  # 호출할 서비스명
-            service_func=handle_set_hot_water_mode,
-            schema=vol.Schema({vol.Required("mode"): vol.All(vol.Coerce(int), vol.In([0, 1, 2]))}),
-        )
+    import voluptuous as vol
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.entity_component import async_get_platforms
+
+async def async_added_to_hass(self) -> None:
+    """Register custom services when entity is added to HA."""
+    await super().async_added_to_hass()
+
+    async def handle_set_hot_water_mode(call):
+        mode = call.data.get("mode")
+        entity_ids = call.data.get("entity_id")
+
+        if mode is None or entity_ids is None:
+            _LOGGER.error("entity_id and mode are required parameters for set_hot_water_mode")
+            return
+
+        entity_ids = entity_ids if isinstance(entity_ids, list) else [entity_ids]
+
+        # 'climate' 플랫폼에서 등록된 엔티티 가져오기
+        platforms = async_get_platforms(self.hass, domain="climate")
+        if not platforms:
+            _LOGGER.error("No climate platform found for handling set_hot_water_mode")
+            return
+
+        # platform마다 엔티티 관리
+        for platform in platforms:
+            for entity in platform.entities.values():
+                if entity.entity_id in entity_ids:
+                    if hasattr(entity, 'set_hot_water_mode'):
+                        _LOGGER.info(f"Setting hot water mode {mode} for {entity.entity_id}")
+                        entity.set_hot_water_mode(mode)
+                    else:
+                        _LOGGER.warning(f"Entity {entity.entity_id} does not support set_hot_water_mode()")
+
+    # 서비스 등록
+    self.hass.services.async_register(
+        domain="sihas",
+        service="set_hot_water_mode",
+        service_func=handle_set_hot_water_mode,
+        schema=vol.Schema({
+            vol.Required("entity_id"): cv.entity_ids,
+            vol.Required("mode"): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
+        }),
+    )
+
 
 
 
