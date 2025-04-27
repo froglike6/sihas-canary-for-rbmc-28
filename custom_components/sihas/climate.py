@@ -1,296 +1,95 @@
-"""Platform for light integration."""
+"""Platform for sihas BCM climate (boiler) integration."""
 from __future__ import annotations
 
 import logging
 import math
-from abc import abstractmethod
-from dataclasses import dataclass
-from datetime import timedelta
-from enum import Enum, IntEnum
 import time
-from typing import Dict, List, Optional, cast
-
 import voluptuous as vol
+from datetime import timedelta
+from typing import Any, Final, Optional, ClassVar
+
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.helpers import config_validation as cv
-from homeassistant.core import callback
-from .const import DOMAIN
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
-    HVACAction,
     HVACMode,
-    FAN_AUTO,
-    FAN_HIGH,
-    FAN_LOW,
-    FAN_MEDIUM,
+    HVACAction,
     ClimateEntityFeature,
-    SWING_BOTH,
-    SWING_HORIZONTAL,
-    SWING_OFF,
-    SWING_VERTICAL,
 )
-from homeassistant.components.select import SelectEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    ATTR_TEMPERATURE,
-    UnitOfTemperature,
-)
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from typing_extensions import Final
 
 from .const import (
-    CONF_CFG,
     CONF_IP,
     CONF_MAC,
-    CONF_NAME,
     CONF_TYPE,
-    DEFAULT_PARALLEL_UPDATES,
-    ICON_COOLER,
+    CONF_CFG,
+    CONF_NAME,
+    DOMAIN,
     ICON_HEATER,
+    DEFAULT_PARALLEL_UPDATES,
     SIHAS_PLATFORM_SCHEMA,
 )
-from .errors import ModbusNotEnabledError, PacketSizeError
-from .packet_builder import packet_builder as pb
-from .sender import send
-from .sihas_base import SihasEntity, SihasProxy, SihasSubEntity
-
-SCAN_INTERVAL: Final = timedelta(seconds=5)
-
-HCM_REG_ONOFF: Final = 0
-HCM_REG_SET_TMP: Final = 1
-HCM_REG_CUR_TMP: Final = 4
-HCM_REG_CUR_VALVE: Final = 5
-HCM_REG_NUMBER_OF_ROOMS: Final = 18
-HVM_REG_NUMBER_OF_ROOMS: Final = 21
-HCM_REG_STATE_START: Final = 52
-HCM_REG_ROOM_TEMP_UNIT: Final = 59
-
-# HCM room register mask
-HCM_MASK_ONOFF: Final = 0b_0000_0000_0000_0001
-HCM_MASK_OPMOD: Final = 0b_0000_0000_0000_0110
-HCM_MASK_VALVE: Final = 0b_0000_0000_0000_1000
-HCM_MASK_CURTMP: Final = 0b0000_0011_1111_0000
-HCM_MASK_SETTMP: Final = 0b1111_1100_0000_0000
+from .sihas_base import SihasEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+SCAN_INTERVAL: Final = timedelta(seconds=5)
 PARALLEL_UPDATES: Final = DEFAULT_PARALLEL_UPDATES
-PLATFORM_SCHEMA: Final = SIHAS_PLATFORM_SCHEMA
 
+# BCM register indices
+BCM_REG_ONOFF: Final = 0         # 보일러 운전상태 ON/OFF
+BCM_REG_ROOMSETPT: Final = 1     # 실내난방 설정온도(x1)
+BCM_REG_ONDOLSETPT: Final = 2    # 온돌난방 설정온도(x1)
+BCM_REG_ONSUSETPT: Final = 3     # 온수 전용 설정온도(x1)
+BCM_REG_OPERMODE: Final = 4      # 운전모드 비트필드
+BCM_REG_OUTMODE: Final = 5       # 외출모드
+BCM_REG_TIMERMODE: Final = 6     # 예약모드
+BCM_REG_ROOMTEMP: Final = 8      # 실내온도(x0.1)
+BCM_REG_ONDOLTEMP: Final = 9     # 온돌온도(x1)
+BCM_REG_FIRE_STATE: Final = 11   # 연소상태
+
+class BcmHeatMode(ClassVar):
+    Room: Final[int] = 0
+    Ondol: Final[int] = 1
+
+class BcmOpMode:
+    """운전모드 비트필드 파싱 결과."""
+    def __init__(self, reg: int):
+        # bit0: 온수, bit1: 난방 on/off, bit2: mode(0=Room,1=Ondol)
+        self.isOnsuOn = bool(reg & 0x01)
+        self.isHeatOn = bool(reg & 0x02)
+        self.heatMode = BcmHeatMode.Ondol if (reg & 0x04) else BcmHeatMode.Room
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    if entry.data[CONF_TYPE] == "BCM":
-        async_add_entities(
-            [
-                Bcm300(
-                    entry.data[CONF_IP],
-                    entry.data[CONF_MAC],
-                    entry.data[CONF_TYPE],
-                    entry.data[CONF_CFG],
-                    entry.data[CONF_NAME],
-                ),
-            ],
+    """BCM-300 보일러 엔티티만 추가."""
+    if entry.data[CONF_TYPE] != "BCM":
+        return
+    async_add_entities([
+        Bcm300(
+            entry.data[CONF_IP],
+            entry.data[CONF_MAC],
+            entry.data[CONF_TYPE],
+            entry.data[CONF_CFG],
+            entry.data[CONF_NAME],
         )
-    return
-
-
-@dataclass
-class RoomSummaryData:
-    current_temperature: float
-    hvac_action: str
-    hvac_mode: str
-    target_temperature: float
-
-
-    # base attribute
-    _attr_icon = ICON_COOLER
-
-    # entity attribute
-    _attr_hvac_modes = [
-        HVACMode.OFF,
-        HVACMode.COOL,
-        HVACMode.DRY,
-        HVACMode.FAN_ONLY,
-        HVACMode.AUTO,
-        HVACMode.HEAT,
-    ]
-    _attr_max_temp = 30
-    _attr_min_temp = 18
-    _attr_supported_features = (
-        ClimateEntityFeature.TARGET_TEMPERATURE
-        | ClimateEntityFeature.FAN_MODE
-        | ClimateEntityFeature.SWING_MODE
-    )
-    _attr_target_temperature_step = 1
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_swing_modes = [
-        SWING_OFF,
-        SWING_VERTICAL,
-        SWING_HORIZONTAL,
-        SWING_BOTH,
-    ]
-    _attr_fan_modes = [FAN_LOW, FAN_MEDIUM, FAN_HIGH, FAN_AUTO]
-
-    # static final
-    REG_ON_OFF: Final = 0
-    REG_SET_POINT: Final = 1
-    REG_MODE: Final = 2
-    REG_FAN: Final = 3
-    REG_SWING: Final = 4
-    REG_EXEC_UCR: Final = 5
-    REG_AC_TEMP: Final = 6
-    REG_LIST_UCR1: Final = 54
-    REG_LIST_UCR2: Final = 55
-
-    HVAC_MODE_TABLE: Final = [
-        HVACMode.COOL,
-        HVACMode.DRY,
-        HVACMode.FAN_ONLY,
-        HVACMode.AUTO,
-        HVACMode.HEAT,
-    ]
-    SWING_MODE_TABLE: Final = [
-        SWING_OFF,
-        SWING_VERTICAL,
-        SWING_HORIZONTAL,
-        SWING_BOTH,
-    ]
-    FAN_TABLE: Final = [FAN_LOW, FAN_MEDIUM, FAN_HIGH, FAN_AUTO]
-
-    def __init__(
-        self,
-        ip: str,
-        mac: str,
-        device_type: str,
-        config: int,
-        name: Optional[str] = None,
-    ):
-        super().__init__(
-            ip=ip,
-            mac=mac,
-            device_type=device_type,
-            config=config,
-            name=name,
-        )
-
-    # TODO: async fuction raise excaption. why?
-    def set_hvac_mode(self, hvac_mode: str):
-        """
-        Set the HVAC mode for the AC unit.
-
-        This method handles the setting of HVAC mode for the AC unit, considering
-        the differences between how Home Assistant (HA) and the AC unit treat on/off
-        states and HVAC modes. In HA, there is no explicit ON command, so this method
-        ensures the correct sequence of commands is sent to the AC unit.
-
-        Args:
-            hvac_mode (str): The desired HVAC mode to set. This should be one of the
-                             modes defined in HVACMode.
-
-        Behavior:
-            - If the command is OFF, the AC unit is turned off.
-            - If the command is not OFF, the mode is changed first, followed by a delay
-              to prevent IR conflict, and then the AC unit is turned on.
-
-        Note:
-            - A delay of 0.5 seconds is introduced between changing the mode and turning
-              the unit on to prevent IR signal conflicts.
-        """
-
-        if hvac_mode == HVACMode.OFF:
-            self.command(Acm300.REG_ON_OFF, 0)
-            return
-
-        # Change mode first
-        if self.hvac_mode != hvac_mode:
-            self.command(
-                self.REG_MODE,
-                self.HVAC_MODE_TABLE.index(hvac_mode),
-            )
-            time.sleep(0.5) # Delay to prevent IR conflict
-
-        if self.hvac_mode == HVACMode.OFF:
-            self.command(Acm300.REG_ON_OFF, 1)
-
-    def set_temperature(self, **kwargs):
-        tmp = cast(float, kwargs.get(ATTR_TEMPERATURE))
-        self.command(Acm300.REG_SET_POINT, int(tmp))
-
-    def set_swing_mode(self, swing_mode):
-        self.command(Acm300.REG_SWING, Acm300.SWING_MODE_TABLE.index(swing_mode))
-
-    def set_fan_mode(self, fan_mode):
-        self.command(Acm300.REG_FAN, Acm300.FAN_TABLE.index(fan_mode))
-
-    def update(self):
-        if regs := self.poll():
-            self._attr_hvac_mode = (
-                HVACMode.OFF
-                if regs[Acm300.REG_ON_OFF] == 0
-                else Acm300.HVAC_MODE_TABLE[regs[Acm300.REG_MODE]]
-            )
-            self._attr_swing_mode = Acm300.SWING_MODE_TABLE[regs[Acm300.REG_SWING]]
-            self._attr_fan_mode = Acm300.FAN_TABLE[regs[Acm300.REG_FAN]]
-            if self.config == 1:
-                self._attr_current_temperature = regs[Acm300.REG_AC_TEMP] / 10
-            self._attr_target_temperature = regs[Acm300.REG_SET_POINT]
-
-
-class OutModeEntity(SelectEntity):
-    OUT_MODE: Final[str] = "OUT"  # 외출
-    OCCUPY_MODE: Final[str] = "OCCUPY"  # 재실
-
-    def __init__(self) -> None:
-        SelectEntity.__init__(self)
-        self._attr_options = [OutModeEntity.OUT_MODE, OutModeEntity.OCCUPY_MODE]
-        self._attr_current_option = None
-
-    @abstractmethod
-    def select_option(self, option: str) -> None:
-        """Change the selected option."""
-
-
-class BcmHeatMode(Enum):
-    Room: Final = 0
-    Ondol: Final = 1
-
-
-@dataclass
-class BcmOpMode:
-    isOnsuOn: bool
-    isHeatOn: bool
-    heatMode: BcmHeatMode
-
-
-# BCM
-BCM_REG_ONOFF: Final = 0  # 보일러 운전상태 ON/OFF
-BCM_REG_ROOMSETPT: Final = 1  # 보일러 실내난방 설정온도(x1)
-BCM_REG_ONDOLSETPT: Final = 2  # 보일러 온돌난방 설정온도(x1)
-BCM_REG_ONSUSETPT: Final = 3  # 보일러 온수전용 설정온도(x1)
-BCM_REG_OPERMODE: Final = 4  # 보일러 운전모드
-BCM_REG_OUTMODE: Final = 5  # 보일러 외출모드(0=재실,1=외출)
-BCM_REG_TIMERMODE: Final = 6  # 보일러 예약모드(0=예약없음,1=예약실행)
-BCM_REG_TIMERTIME: Final = 7  # 보일러 예약시간(예:1210->12시간마다 10분가동)
-BCM_REG_ROOMTEMP: Final = 8  # 보일러 실내온도(x0.1)
-BCM_REG_ONDOLTEMP: Final = 9  # 보일러 온돌온도(x1)
-BCM_REG_ONSUTEMP: Final = 10  # 보일러 온수온도(x1)
-BCM_REG_FIRE_STATE: Final = 11  # 보일러 연소상태(0=정지,1=연소)
-BCM_REG_ERRORST: Final = 12  # 보일러 에러상태(0=정상, 그외는 에러)
-BCM_REG_WATERST: Final = 13  # 보일러 물보충상태(0=정상, 1=물보충필요)
-BCM_REG_ONLINEST: Final = 14  # 보일러 통신상태(0=온라인, 1=오프라인)
-
+    ], update_before_add=True)
 
 class Bcm300(SihasEntity, ClimateEntity):
+    """SiHAS BCM-300 Boiler controller."""
+
     _attr_icon = ICON_HEATER
-    _attr_hvac_modes: Final = [HVACMode.OFF, HVACMode.HEAT, HVACMode.FAN_ONLY, HVACMode.AUTO]
-    _attr_max_temp: Final = 80
-    _attr_min_temp: Final = 0
-    _attr_supported_features: Final = ClimateEntityFeature.TARGET_TEMPERATURE
-    _attr_target_temperature_step: Final = 1
-    _attr_temperature_unit: Final = UnitOfTemperature.CELSIUS
+    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.FAN_ONLY, HVACMode.AUTO]
+    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+    _attr_max_temp = 80
+    _attr_min_temp = 0
+    _attr_target_temperature_step = 1
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
 
     def __init__(
         self,
@@ -300,17 +99,11 @@ class Bcm300(SihasEntity, ClimateEntity):
         config: int,
         name: str | None = None,
     ) -> None:
-        super().__init__(
-            ip=ip,
-            mac=mac,
-            device_type=device_type,
-            config=config,
-            name=name,
-        )
-
+        super().__init__(ip, mac, device_type, config, name)
         self.opmode: Optional[BcmOpMode] = None
 
-    def set_hvac_mode(self, hvac_mode: str):
+    def set_hvac_mode(self, hvac_mode: str) -> None:
+        """난방(FAN_ONLY), 난방(HEAT), 자동(AUTO), 끄기(OFF) 처리."""
         if hvac_mode == HVACMode.FAN_ONLY:
             self.command(BCM_REG_OUTMODE, 1)
             self.command(BCM_REG_ONOFF, 1)
@@ -325,76 +118,57 @@ class Bcm300(SihasEntity, ClimateEntity):
         elif hvac_mode == HVACMode.OFF:
             self.command(BCM_REG_ONOFF, 0)
 
-    def set_temperature(self, **kwargs):
-        tmp = cast(float, kwargs.get(ATTR_TEMPERATURE))
+    def set_temperature(self, **kwargs: Any) -> None:
+        """현재 운전모드(Room/Ondol)에 따라 실내난방 또는 온돌난방 온도 설정."""
+        tmp = float(kwargs.get(ATTR_TEMPERATURE))
+        assert self.opmode is not None, "운전모드 정보 없음"
+        reg = BCM_REG_ROOMSETPT if self.opmode.heatMode == BcmHeatMode.Room else BCM_REG_ONDOLSETPT
+        self.command(reg, math.floor(tmp))
 
-        assert self.opmode != None
-        self.command(
-            BCM_REG_ROOMSETPT if (self.opmode.heatMode == BcmHeatMode.Room) else BCM_REG_ONDOLSETPT,
-            math.floor(tmp),
-        )
-
-    def update(self):
+    def update(self) -> None:
+        """최신 레지스터를 읽어 상태 갱신."""
         if regs := self.poll():
-            self.opmode = self._parse_oper_mode(regs)
-
+            self.opmode = BcmOpMode(regs[BCM_REG_OPERMODE])
             self._attr_hvac_mode = self._resolve_hvac_mode(regs)
             self._attr_hvac_action = self._resolve_hvac_action(regs)
 
-            setpt: Optional[int] = None  # set point
-            curpt: Optional[int] = None  # current point
-
             if self.opmode.heatMode == BcmHeatMode.Room:
-                setpt = regs[BCM_REG_ROOMSETPT]
-                curpt = math.floor(regs[BCM_REG_ROOMTEMP] / 10)
+                cur = math.floor(regs[BCM_REG_ROOMTEMP] / 10)
+                tgt = regs[BCM_REG_ROOMSETPT]
             else:
-                setpt = regs[BCM_REG_ONDOLSETPT]
-                curpt = regs[BCM_REG_ONDOLTEMP]
+                cur = regs[BCM_REG_ONDOLTEMP]
+                tgt = regs[BCM_REG_ONDOLSETPT]
 
-            self._attr_current_temperature = curpt
-            self._attr_target_temperature = setpt
+            self._attr_current_temperature = cur
+            self._attr_target_temperature = tgt
 
-    def _resolve_hvac_mode(self, regs):
+    def _resolve_hvac_mode(self, regs: list[int]) -> str:
         if regs[BCM_REG_ONOFF] == 0:
             return HVACMode.OFF
-        elif regs[BCM_REG_TIMERMODE] == 1:
+        if regs[BCM_REG_TIMERMODE] == 1:
             return HVACMode.HEAT
-        elif regs[BCM_REG_OUTMODE] == 1:
+        if regs[BCM_REG_OUTMODE] == 1:
             return HVACMode.FAN_ONLY
-        else:
-            return HVACMode.AUTO
+        return HVACMode.AUTO
 
-    def _resolve_hvac_action(self, regs):
+    def _resolve_hvac_action(self, regs: list[int]) -> str:
         if regs[BCM_REG_ONOFF] == 0:
             return HVACAction.OFF
-        # elif regs[BCM_REG_OUTMODE] == 1:
-        #     return HVACAction.FAN
-        elif regs[BCM_REG_FIRE_STATE] == 0:
+        if regs[BCM_REG_FIRE_STATE] == 0:
             return HVACAction.IDLE
-        else:
-            return HVACAction.HEATING
+        return HVACAction.HEATING
 
-    def _parse_oper_mode(self, regs: List[int]) -> BcmOpMode:
-        r"""보일러 운전모드 파싱
-        regs[_BCMOPERMODE] = 0b_0000_0000
-                                       \\\_온수 ON/OFF Flag
-                                        \\_난방 ON/OFF Flag
-                                         \_난방 모드 Flag [0=실내, 1=온돌]
-        """
-        reg = regs[BCM_REG_OPERMODE]
-
-        return BcmOpMode(
-            (reg & 1) != 0,
-            (reg & (1 << 1)) != 0,
-            BcmHeatMode.Ondol if (reg & (1 << 2)) != 0 else BcmHeatMode.Room,
-        )
-    
     def set_hot_water_mode(self, mode: int) -> None:
+        """
+        온수 온도 모드 설정 서비스.
+        mode: 0=저온, 1=중온, 2=고온
+        """
         assert 0 <= mode <= 2, "mode must be 0, 1 or 2"
         self.command(BCM_REG_ONSUSETPT, mode)
         self.async_write_ha_state()
-    
-    async def async_added_to_hass(self):
+
+    async def async_added_to_hass(self) -> None:
+        """엔티티가 추가될 때 ‘set_hot_water_mode’ 서비스를 등록."""
         await super().async_added_to_hass()
         self.hass.services.async_register(
             DOMAIN,
@@ -407,12 +181,13 @@ class Bcm300(SihasEntity, ClimateEntity):
         )
 
     @callback
-    def _handle_set_hot_water_mode(self, call) -> None:
+    def _handle_set_hot_water_mode(self, call: Any) -> None:
+        """서비스 호출 처리: 대상 entity_id에 set_hot_water_mode 실행."""
         target_ids = call.data["entity_id"]
         mode = call.data["mode"]
-        entities = self.hass.data["climate"].entities
         if isinstance(target_ids, str):
             target_ids = [target_ids]
-        for ent in entities.values():
+        # climate domain 엔티티 중 Bcm300만 골라 실행
+        for ent in self.hass.data["climate"].entities.values():
             if ent.entity_id in target_ids and isinstance(ent, Bcm300):
                 ent.set_hot_water_mode(mode)
