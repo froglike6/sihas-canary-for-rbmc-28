@@ -474,6 +474,11 @@ class Bcm300(SihasEntity, ClimateEntity):
             BCM_REG_ROOMSETPT if (self.opmode.heatMode == BcmHeatMode.Room) else BCM_REG_ONDOLSETPT,
             math.floor(tmp),
         )
+    def set_hot_water_mode(self, mode: int):
+        """Set hot water mode: 0 (Low), 1 (Medium), 2 (High)."""
+        if mode not in (0, 1, 2):
+            raise ValueError(f"Invalid hot water mode: {mode}. Must be 0, 1, or 2.")
+        self.command(BCM_REG_ONSUSETPT, mode)
 
     def update(self):
         if regs := self.poll():
