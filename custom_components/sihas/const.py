@@ -41,19 +41,7 @@ DEVICE_TYPE: Final = {
 }
 
 SUPPORT_DEVICE: Final[List[str]] = [
-    "ACM",
-    "AQM",
     "BCM",
-    "CCM",
-    "HCM",
-    "HVM",
-    "PMM",
-    "RBM",
-    "SBM",
-    "SDM",
-    "SQM",
-    "STM",
-    "TCM",
 ]
 
 DEFAULT_TIMEOUT: Final = 0.5
