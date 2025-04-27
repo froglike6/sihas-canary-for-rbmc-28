@@ -6,7 +6,8 @@ import math
 import time
 import voluptuous as vol
 from datetime import timedelta
-from typing import Any, Final, Optional, ClassVar
+from enum import IntEnum
+from typing import Any, Final, Optional
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
@@ -50,9 +51,9 @@ BCM_REG_ROOMTEMP: Final = 8      # 실내온도(x0.1)
 BCM_REG_ONDOLTEMP: Final = 9     # 온돌온도(x1)
 BCM_REG_FIRE_STATE: Final = 11   # 연소상태
 
-class BcmHeatMode(ClassVar):
-    Room: Final[int] = 0
-    Ondol: Final[int] = 1
+class BcmHeatMode(IntEnum):
+    Room = 0
+    Ondol = 1
 
 class BcmOpMode:
     """운전모드 비트필드 파싱 결과."""
@@ -187,7 +188,6 @@ class Bcm300(SihasEntity, ClimateEntity):
         mode = call.data["mode"]
         if isinstance(target_ids, str):
             target_ids = [target_ids]
-        # climate domain 엔티티 중 Bcm300만 골라 실행
         for ent in self.hass.data["climate"].entities.values():
             if ent.entity_id in target_ids and isinstance(ent, Bcm300):
                 ent.set_hot_water_mode(mode)
