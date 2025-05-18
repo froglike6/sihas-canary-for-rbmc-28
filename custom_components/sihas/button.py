@@ -12,6 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from typing_extensions import Final
 
 from .climate import Acm300
+from .climate import BCM_REG_ONSUSETPT
 from .const import (
     CONF_CFG,
     CONF_IP,
@@ -46,6 +47,36 @@ async def async_setup_entry(
         )
 
         async_add_entities(await get_ucr(acm))
+    elif entry.data[CONF_TYPE] == "BCM":
+        async_add_entities(
+            [
+                BcmOnsuButton(
+                    ip=entry.data[CONF_IP],
+                    mac=entry.data[CONF_MAC],
+                    device_type=entry.data[CONF_TYPE],
+                    config=entry.data[CONF_CFG],
+                    name=entry.data[CONF_NAME],
+                    level=0, # 저온
+                ),
+                BcmOnsuButton(
+                    ip=entry.data[CONF_IP],
+                    mac=entry.data[CONF_MAC],
+                    device_type=entry.data[CONF_TYPE],
+                    config=entry.data[CONF_CFG],
+                    name=entry.data[CONF_NAME],
+                    level=1, # 중온
+                ),
+                BcmOnsuButton(
+                    ip=entry.data[CONF_IP],
+                    mac=entry.data[CONF_MAC],
+                    device_type=entry.data[CONF_TYPE],
+                    config=entry.data[CONF_CFG],
+                    name=entry.data[CONF_NAME],
+                    level=2, # 고온
+                ),
+            ]
+        )
+
     return
 
 
@@ -82,3 +113,30 @@ class AcmUCR(ButtonEntity):
 
     def press(self) -> None:
         self.acm.command(Acm300.REG_EXEC_UCR, self.number_of_button)
+
+class BcmOnsuButton(ButtonEntity, SihasEntity):
+    _attr_icon = ICON_BUTTON
+    _LEVEL_NAME = {0: "저온", 1: "중온", 2: "고온"}
+
+    def __init__(
+        self,
+        ip: str,
+        mac: str,
+        device_type: str,
+        config: int,
+        name: str | None,
+        level: int,
+    ) -> None:
+        SihasEntity.__init__(
+            self,
+            ip=ip,
+            mac=mac,
+            device_type=device_type,
+            config=config,
+            uid=f"{device_type}-{mac}-onsu-{level}",
+            name=f"{name} {self._LEVEL_NAME[level]}" if name else None,
+        )
+        self._level = level
+    
+    def press(self) -> None:
+        self.command(BCM_REG_ONSUSETPT, self._level)
