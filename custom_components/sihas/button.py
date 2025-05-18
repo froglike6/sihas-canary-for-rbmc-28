@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from typing_extensions import Final
 
+from .sihas_base import SihasEntity
 from .climate import Acm300
 from .climate import BCM_REG_ONSUSETPT
 from .const import (
