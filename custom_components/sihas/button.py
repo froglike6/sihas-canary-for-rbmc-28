@@ -11,7 +11,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from typing_extensions import Final
 
-from .sihas_base import SihasEntity
 from .climate import Acm300
 from .climate import BCM_REG_ONSUSETPT
 from .const import (
@@ -114,6 +113,8 @@ class AcmUCR(ButtonEntity):
 
     def press(self) -> None:
         self.acm.command(Acm300.REG_EXEC_UCR, self.number_of_button)
+
+from .sihas_base import SihasEntity
 
 class BcmOnsuButton(ButtonEntity, SihasEntity):
     _attr_icon = ICON_BUTTON
