@@ -139,6 +139,10 @@ class BcmOnsuButton(ButtonEntity, SihasEntity):
             name=f"{name} {self._LEVEL_NAME[level]}" if name else None,
         )
         self._level = level
+        self._attr_available = True
+    
+    def update(self) -> None:
+        self.poll()
     
     def press(self) -> None:
         self.command(BCM_REG_ONSUSETPT, self._level)
